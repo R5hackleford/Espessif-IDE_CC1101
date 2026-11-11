@@ -1,0 +1,4 @@
+version: "1.0.0"
+description: "TI CC1101 sub-GHz transceiver driver (native ESP-IDF SPI master)"
+dependencies:
+  idf: ">=5.0"
