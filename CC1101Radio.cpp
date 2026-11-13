@@ -124,20 +124,16 @@ bool CC1101Radio::attach() {
   return spi_bus_add_device(_host, &dc, &_dev) == ESP_OK;
 }
 
-void CC1101Radio::select() {
-  spi_device_acquire_bus(_dev, portMAX_DELAY);
+void CC1101Radio::csLow() {
   gpio_set_level((gpio_num_t)_cs, 0);
-  if (_miso >= 0) {  // wait for the chip's crystal-ready signal (MISO low)
+  if (_miso >= 0) {  // wait for the chip's crystal-ready signal (SO low)
     uint32_t t = micros();
     while (gpio_get_level((gpio_num_t)_miso) && (micros() - t) < 2000) {
     }
   }
 }
 
-void CC1101Radio::deselect() {
-  gpio_set_level((gpio_num_t)_cs, 1);
-  spi_device_release_bus(_dev);
-}
+void CC1101Radio::csHigh() { gpio_set_level((gpio_num_t)_cs, 1); }
 
 // Full-duplex transfer of n bytes while CS is held low. Split into <= 64-byte pieces, which the
 // driver handles from the hardware FIFO without DMA-capable buffers. tx/rx may be nullptr.
@@ -166,76 +162,120 @@ void CC1101Radio::waitReady(uint32_t timeoutUs) {
   }
 }
 
-uint8_t CC1101Radio::readReg(uint8_t reg) {
+// ---- unlocked primitives (caller holds a BusLock) ----
+
+uint8_t CC1101Radio::readRegUnlocked(uint8_t reg) {
   uint8_t tx[2] = {(uint8_t)(reg | BIT_READ), 0x00}, rx[2];
-  select();
+  csLow();
   xfer(tx, rx, 2);
-  deselect();
+  csHigh();
   return rx[1];
 }
 
-void CC1101Radio::writeReg(uint8_t reg, uint8_t value) {
+void CC1101Radio::writeRegUnlocked(uint8_t reg, uint8_t value) {
   uint8_t tx[2] = {reg, value};
-  select();
+  csLow();
   xfer(tx, nullptr, 2);
-  deselect();
+  csHigh();
 }
 
-void CC1101Radio::rmwReg(uint8_t reg, uint8_t mask, uint8_t value) {
-  uint8_t v = readReg(reg);
-  writeReg(reg, (uint8_t)((v & ~mask) | (value & mask)));
+void CC1101Radio::rmwRegUnlocked(uint8_t reg, uint8_t mask, uint8_t value) {
+  uint8_t v = readRegUnlocked(reg);
+  writeRegUnlocked(reg, (uint8_t)((v & ~mask) | (value & mask)));
 }
 
 // Status registers share addresses with strobes; the burst bit selects the register.
-uint8_t CC1101Radio::readStatus(uint8_t reg) {
+uint8_t CC1101Radio::readStatusUnlocked(uint8_t reg) {
   uint8_t tx[2] = {(uint8_t)(reg | BIT_READ | BIT_BURST), 0x00}, rx[2];
-  select();
+  csLow();
   xfer(tx, rx, 2);
-  deselect();
+  csHigh();
   return rx[1];
 }
 
 // Registers updated by the radio itself (MARCSTATE, RXBYTES, TXBYTES, PKTSTATUS) can be read
 // corrupt with a small probability (datasheet 10.3 / 15.6, errata). Read until two reads agree.
-uint8_t CC1101Radio::readStatusStable(uint8_t reg) {
-  uint8_t a = readStatus(reg);
+uint8_t CC1101Radio::readStatusStableUnlocked(uint8_t reg) {
+  uint8_t a = readStatusUnlocked(reg);
   for (uint8_t i = 0; i < 4; i++) {
-    uint8_t b = readStatus(reg);
+    uint8_t b = readStatusUnlocked(reg);
     if (a == b) return b;
     a = b;
   }
   return a;
 }
 
-uint8_t CC1101Radio::readMarc() { return readStatusStable(MARCSTATE) & 0x1F; }
-
-uint8_t CC1101Radio::strobe(uint8_t cmd) {
+uint8_t CC1101Radio::strobeUnlocked(uint8_t cmd) {
   uint8_t rx;
-  select();
+  csLow();
   xfer(&cmd, &rx, 1);
-  deselect();
+  csHigh();
   return rx;
 }
 
 // Burst transfers are at most 64 data bytes (the FIFO size).
-void CC1101Radio::readBurst(uint8_t reg, uint8_t* buf, uint8_t len) {
+void CC1101Radio::readBurstUnlocked(uint8_t reg, uint8_t* buf, uint8_t len) {
   if (len > 64) len = 64;
   uint8_t tx[65] = {0}, rx[65];
   tx[0] = reg | BIT_READ | BIT_BURST;
-  select();
+  csLow();
   xfer(tx, rx, (size_t)len + 1);
-  deselect();
+  csHigh();
   memcpy(buf, rx + 1, len);
 }
 
-void CC1101Radio::writeBurst(uint8_t reg, const uint8_t* buf, uint8_t len) {
+void CC1101Radio::writeBurstUnlocked(uint8_t reg, const uint8_t* buf, uint8_t len) {
   if (len > 64) len = 64;
   uint8_t tx[65];
   tx[0] = reg | BIT_BURST;
   memcpy(tx + 1, buf, len);
-  select();
+  csLow();
   xfer(tx, nullptr, (size_t)len + 1);
-  deselect();
+  csHigh();
+}
+
+// ---- public / locking wrappers ----
+
+uint8_t CC1101Radio::readReg(uint8_t reg) {
+  BusLock lock(_dev);
+  return readRegUnlocked(reg);
+}
+
+void CC1101Radio::writeReg(uint8_t reg, uint8_t value) {
+  BusLock lock(_dev);
+  writeRegUnlocked(reg, value);
+}
+
+void CC1101Radio::rmwReg(uint8_t reg, uint8_t mask, uint8_t value) {
+  BusLock lock(_dev);
+  rmwRegUnlocked(reg, mask, value);
+}
+
+uint8_t CC1101Radio::readStatus(uint8_t reg) {
+  BusLock lock(_dev);
+  return readStatusUnlocked(reg);
+}
+
+uint8_t CC1101Radio::readStatusStable(uint8_t reg) {
+  BusLock lock(_dev);
+  return readStatusStableUnlocked(reg);
+}
+
+uint8_t CC1101Radio::readMarc() { return readStatusStable(MARCSTATE) & 0x1F; }
+
+uint8_t CC1101Radio::strobe(uint8_t cmd) {
+  BusLock lock(_dev);
+  return strobeUnlocked(cmd);
+}
+
+void CC1101Radio::readBurst(uint8_t reg, uint8_t* buf, uint8_t len) {
+  BusLock lock(_dev);
+  readBurstUnlocked(reg, buf, len);
+}
+
+void CC1101Radio::writeBurst(uint8_t reg, const uint8_t* buf, uint8_t len) {
+  BusLock lock(_dev);
+  writeBurstUnlocked(reg, buf, len);
 }
 
 // ---------------------------------------------------------------- init
@@ -244,23 +284,24 @@ void CC1101Radio::writeBurst(uint8_t reg, const uint8_t* buf, uint8_t len) {
 // SO low, SRES with CS held low, wait for SO low again, CS high.
 void CC1101Radio::reset() {
   _asleep = false;
-  gpio_set_level((gpio_num_t)_cs, 1);
-  delayMicroseconds(5);
-  gpio_set_level((gpio_num_t)_cs, 0);
-  delayMicroseconds(10);
-  gpio_set_level((gpio_num_t)_cs, 1);
-  delayMicroseconds(45);
+  {
+    BusLock lock(_dev);
+    csHigh();
+    delayMicroseconds(5);
+    gpio_set_level((gpio_num_t)_cs, 0);
+    delayMicroseconds(10);
+    csHigh();
+    delayMicroseconds(45);
 
-  uint8_t cmd = SRES;
-  spi_device_acquire_bus(_dev, portMAX_DELAY);
-  gpio_set_level((gpio_num_t)_cs, 0);
-  waitReady(5000);
-  xfer(&cmd, nullptr, 1);
-  delayMicroseconds(10);
-  waitReady(5000);
-  gpio_set_level((gpio_num_t)_cs, 1);
-  spi_device_release_bus(_dev);
-  delay(1);
+    uint8_t cmd = SRES;
+    gpio_set_level((gpio_num_t)_cs, 0);
+    waitReady(5000);
+    xfer(&cmd, nullptr, 1);
+    delayMicroseconds(10);
+    waitReady(5000);
+    csHigh();
+  }
+  delay(1);  // outside the lock: don't hold the bus while we wait
 }
 
 int16_t CC1101Radio::begin(float freqMHz, float bitrateKbps, float devKHz, float rxBwKHz,
@@ -674,14 +715,17 @@ void CC1101Radio::setInductorType(InductorType t) {
 // (datasheet 24 / FREND0.PA_POWER).
 void CC1101Radio::applyPa() {
   uint8_t table[8] = {0};
+  uint8_t frend0;
   if (_mod == MOD_ASK_OOK) {
     table[1] = _pa;
-    writeReg(FREND0, 0x11);
+    frend0 = 0x11;
   } else {
     table[0] = _pa;
-    writeReg(FREND0, 0x10);
+    frend0 = 0x10;
   }
-  writeBurst(PATABLE, table, 8);
+  BusLock lock(_dev);
+  writeRegUnlocked(FREND0, frend0);
+  writeBurstUnlocked(PATABLE, table, 8);
 }
 
 // ---------------------------------------------------------------- state control
@@ -704,12 +748,15 @@ void CC1101Radio::idle() {
 // flushes both FIFOs. Keep copies so wake() can put them back.
 void CC1101Radio::sleep() {
   idle();
-  readBurst(PATABLE, _paSaved, 8);
-  _testSaved[0] = readReg(FSTEST);
-  _testSaved[1] = readReg(TEST2);
-  _testSaved[2] = readReg(TEST1);
-  _testSaved[3] = readReg(TEST0);
-  strobe(SPWD);  // executes when CS goes high
+  {
+    BusLock lock(_dev);
+    readBurstUnlocked(PATABLE, _paSaved, 8);
+    _testSaved[0] = readRegUnlocked(FSTEST);
+    _testSaved[1] = readRegUnlocked(TEST2);
+    _testSaved[2] = readRegUnlocked(TEST1);
+    _testSaved[3] = readRegUnlocked(TEST0);
+    strobeUnlocked(SPWD);  // executes when CS goes high
+  }
   _asleep = true;
 }
 
@@ -718,17 +765,17 @@ void CC1101Radio::sleep() {
 void CC1101Radio::wake() {
   if (!_asleep) return;
   _asleep = false;
-  spi_device_acquire_bus(_dev, portMAX_DELAY);
-  gpio_set_level((gpio_num_t)_cs, 0);
-  waitReady(10000);
-  gpio_set_level((gpio_num_t)_cs, 1);
-  spi_device_release_bus(_dev);
-
-  writeReg(FSTEST, _testSaved[0]);
-  writeReg(TEST2, _testSaved[1]);
-  writeReg(TEST1, _testSaved[2]);
-  writeReg(TEST0, _testSaved[3]);
-  writeBurst(PATABLE, _paSaved, 8);
+  {
+    BusLock lock(_dev);
+    gpio_set_level((gpio_num_t)_cs, 0);  // CS low wakes the chip and starts the crystal
+    waitReady(10000);
+    csHigh();
+    writeRegUnlocked(FSTEST, _testSaved[0]);
+    writeRegUnlocked(TEST2, _testSaved[1]);
+    writeRegUnlocked(TEST1, _testSaved[2]);
+    writeRegUnlocked(TEST0, _testSaved[3]);
+    writeBurstUnlocked(PATABLE, _paSaved, 8);
+  }
   waitMarc(MARC_IDLE, 5000);
 }
 
@@ -742,8 +789,9 @@ void CC1101Radio::calibrate() {
 
 bool CC1101Radio::startReceive() {
   idle();
-  strobe(SFRX);
-  strobe(SRX);
+  BusLock lock(_dev);
+  strobeUnlocked(SFRX);
+  strobeUnlocked(SRX);
   return true;
 }
 
@@ -764,11 +812,9 @@ int16_t CC1101Radio::sendPacket(bool withAddr, uint8_t dest, const uint8_t* data
   if (len == 0 || total > (fixed ? 64 : MAX_PAYLOAD)) return ERR_LENGTH;
 
   idle();
-  strobe(SFTX);
 
   // In fixed mode any size can be sent: PKTLEN is set to this packet's size and put back below.
   bool retarget = fixed && total != _fixedLen;
-  if (retarget) writeReg(PKTLEN, (uint8_t)total);
 
   // TX FIFO burst write. Variable mode: length byte first (counts the address byte). Fixed mode:
   // no length byte. Then the optional address byte, then the payload.
@@ -779,12 +825,20 @@ int16_t CC1101Radio::sendPacket(bool withAddr, uint8_t dest, const uint8_t* data
   if (withAddr) frame[n++] = dest;
   memcpy(frame + n, data, len);
   n += len;
-  select();
-  xfer(frame, nullptr, n);
-  deselect();
 
-  bool crc = (readReg(PKTCTRL0) & 0x04) != 0;
-  strobe(STX);
+  bool crc;
+  {
+    // One lock for the whole load-and-go sequence: no other task's traffic gets in between the
+    // FIFO write and STX.
+    BusLock lock(_dev);
+    strobeUnlocked(SFTX);
+    if (retarget) writeRegUnlocked(PKTLEN, (uint8_t)total);
+    csLow();
+    xfer(frame, nullptr, n);
+    csHigh();
+    crc = (readRegUnlocked(PKTCTRL0) & 0x04) != 0;
+    strobeUnlocked(STX);
+  }
 
   if (timeoutMs == 0) {
     // preamble + sync + (length) + payload + CRC, scaled for Manchester / FEC (2 symbols per bit)
@@ -875,9 +929,12 @@ int16_t CC1101Radio::readPacket(uint8_t* buf, uint8_t maxLen, PacketInfo* info) 
     return ERR_BUF_SMALL;
   }
 
-  readBurst(FIFO, buf, len);
   uint8_t status[2];
-  readBurst(FIFO, status, 2);  // RSSI, then LQI | CRC_OK<<7 (PKTCTRL1 append-status)
+  {
+    BusLock lock(_dev);
+    readBurstUnlocked(FIFO, buf, len);
+    readBurstUnlocked(FIFO, status, 2);  // RSSI, then LQI | CRC_OK<<7 (PKTCTRL1 append-status)
+  }
   startReceive();
 
   bool crcOk = (status[1] & 0x80) != 0;
