@@ -1,0 +1,7 @@
+-Wno-frame-address
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+"-specs=/home/rusty/Espessif_CC1101/examples/two_radio_test/build/specs/picolibc.specs"
+-D__PICOLIBC_ERRNO_FUNCTION=__errno

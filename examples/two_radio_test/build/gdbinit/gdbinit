@@ -1,0 +1,2 @@
+source /home/rusty/Espessif_CC1101/examples/two_radio_test/build/gdbinit/symbols
+source /home/rusty/Espessif_CC1101/examples/two_radio_test/build/gdbinit/connect
