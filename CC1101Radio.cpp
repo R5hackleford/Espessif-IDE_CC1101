@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_err.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -28,6 +29,19 @@ constexpr uint8_t BIT_BURST = 0x40;
 
 // Burst access is limited to 6.5 MHz when there is no delay between bytes (Table 22).
 constexpr uint32_t SPI_MAX_HZ = 6500000UL;
+
+class BusLock {
+ public:
+  explicit BusLock(spi_device_handle_t dev) : dev_(dev) {
+    ESP_ERROR_CHECK(spi_device_acquire_bus(dev_, portMAX_DELAY));
+  }
+  ~BusLock() { spi_device_release_bus(dev_); }
+  BusLock(const BusLock&) = delete;
+  BusLock& operator=(const BusLock&) = delete;
+
+ private:
+  spi_device_handle_t dev_;
+};
 
 // Output power steps and matching PATABLE bytes.
 // 315/433/868/915 *_ML: datasheet Table 39 (multi-layer inductors).
@@ -145,7 +159,7 @@ void CC1101Radio::xfer(const uint8_t* tx, uint8_t* rx, size_t n) {
     t.length = chunk * 8;
     t.tx_buffer = tx ? tx + off : nullptr;
     t.rx_buffer = rx ? rx + off : nullptr;
-    spi_device_polling_transmit(_dev, &t);
+    ESP_ERROR_CHECK(spi_device_polling_transmit(_dev, &t));
     off += chunk;
   }
 }

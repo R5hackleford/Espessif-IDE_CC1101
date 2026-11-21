@@ -258,10 +258,18 @@ class CC1101Radio {
 
  private:
   bool attach();
-  void select();
-  void deselect();
+  void csLow();
+  void csHigh();
   void xfer(const uint8_t* tx, uint8_t* rx, size_t n);
   void waitReady(uint32_t timeoutUs);
+  uint8_t readRegUnlocked(uint8_t reg);
+  void writeRegUnlocked(uint8_t reg, uint8_t value);
+  void rmwRegUnlocked(uint8_t reg, uint8_t mask, uint8_t value);
+  uint8_t readStatusUnlocked(uint8_t reg);
+  uint8_t readStatusStableUnlocked(uint8_t reg);
+  uint8_t strobeUnlocked(uint8_t cmd);
+  void readBurstUnlocked(uint8_t reg, uint8_t* buf, uint8_t len);
+  void writeBurstUnlocked(uint8_t reg, const uint8_t* buf, uint8_t len);
   uint8_t readStatusStable(uint8_t reg);
   uint8_t readMarc();
   bool waitMarc(uint8_t state, uint32_t timeoutUs);
