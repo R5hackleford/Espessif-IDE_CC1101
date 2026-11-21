@@ -36,7 +36,17 @@ In the serial monitor (default 115200 baud), send lines using Enter:
 * `status` prints chip identity and state.
 * `send a hello` tests A to B; `send b hello` tests B to A.
 * `test` runs five packets in each direction; `test 20` runs 20 each (maximum 100).
+* `sweep` scans 433.000 through 434.800 MHz in 0.100 MHz steps using both radios.
 * `help` lists commands.
+
+The sweep is receive-only: each radio measures RSSI after 20 ms at each frequency,
+and the console prints CSV rows with frequency and each radio's dBm reading. It
+temporarily disables sync detection so RSSI can update continuously, then restores
+the packet settings and prior frequencies. The 135 kHz nominal receive bandwidth
+makes adjacent measurements overlap; this is a snapshot of received energy, not a
+calibrated spectrum analyzer or a measurement of channel occupancy over time. Short
+signals between measurements may be missed. The sweep range and timing can be changed
+in the example's constants to suit your modules.
 
 Each exchange reports pass/fail, RSSI and LQI on success. A receive timeout, CRC
 error, or unexpected payload is a failure, not a successful transmit. On startup,

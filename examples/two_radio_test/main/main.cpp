@@ -17,6 +17,8 @@ constexpr int PIN_SCK = 18, PIN_MISO = 19, PIN_MOSI = 23;
 constexpr int PIN_CS_A = 25, PIN_CS_B = 26;
 constexpr float FREQUENCY_MHZ = 433.92f;
 constexpr int RECEIVE_TIMEOUT_MS = 250;
+constexpr int SWEEP_START_KHZ = 433000, SWEEP_END_KHZ = 434800, SWEEP_STEP_KHZ = 100;
+constexpr int SWEEP_SETTLE_MS = 20;
 
 CC1101Radio radioA(SPI2_HOST, PIN_CS_A, PIN_MISO);
 CC1101Radio radioB(SPI2_HOST, PIN_CS_B, PIN_MISO);
@@ -27,7 +29,8 @@ void help() {
          "  status            Show both radios\n"
          "  send a <text>     Send from A to B (1-61 bytes)\n"
          "  send b <text>     Send from B to A (1-61 bytes)\n"
-         "  test [count]      Test both directions (default 5, max 100)\n");
+         "  test [count]      Test both directions (default 5, max 100)\n"
+         "  sweep             Receive-only 433.0-434.8 MHz RSSI scan\n");
 }
 
 void status() {
@@ -87,11 +90,64 @@ void runTest(int count) {
   printf("Result: %d/%d packets passed\n", passed, count * 2);
 }
 
+void sweep() {
+  const float frequencyA = radioA.frequency();
+  const float frequencyB = radioB.frequency();
+  bool ok = radioA.setSyncMode(CC1101Radio::SYNC_NONE) &&
+            radioA.setInfiniteLength() &&
+            radioB.setSyncMode(CC1101Radio::SYNC_NONE) &&
+            radioB.setInfiniteLength();
+  if (ok) {
+    printf("Receive-only sweep: RSSI in dBm, 20 ms per frequency\n"
+           "frequency_mhz,radio_a_dbm,radio_b_dbm\n");
+    for (int khz = SWEEP_START_KHZ; khz <= SWEEP_END_KHZ; khz += SWEEP_STEP_KHZ) {
+      float mhz = khz / 1000.0f;
+      if (!radioA.setFrequency(mhz) || !radioB.setFrequency(mhz) ||
+          !radioA.startReceive() || !radioB.startReceive()) {
+        printf("Sweep failed at %.3f MHz: radio setup failed\n", mhz);
+        ok = false;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(SWEEP_SETTLE_MS) + 1);
+      uint8_t stateA = radioA.marcState();
+      uint8_t stateB = radioB.marcState();
+      if (stateA != CC1101Reg::MARC_RX || stateB != CC1101Reg::MARC_RX) {
+        printf("Sweep failed at %.3f MHz: radio states A=0x%02X B=0x%02X\n",
+               mhz, stateA, stateB);
+        ok = false;
+        break;
+      }
+      float rssiA = radioA.getRSSI();
+      float rssiB = radioB.getRSSI();
+      radioA.idle();
+      radioB.idle();
+      printf("%.3f,%.1f,%.1f\n", mhz, rssiA, rssiB);
+    }
+  } else {
+    printf("Sweep failed: could not configure radios\n");
+  }
+
+  bool restoreA = radioA.setVariableLength() &&
+                  radioA.setSyncMode(CC1101Radio::SYNC_16_16) &&
+                  radioA.setFrequency(frequencyA);
+  bool restoreB = radioB.setVariableLength() &&
+                  radioB.setSyncMode(CC1101Radio::SYNC_16_16) &&
+                  radioB.setFrequency(frequencyB);
+  if (!restoreA || !restoreB) {
+    printf("Radio configuration restore failed; restart the ESP32\n");
+    abort();
+  }
+  printf(ok ? "Sweep complete; packet settings restored\n"
+            : "Sweep aborted; packet settings restored\n");
+}
+
 void command(char* line) {
   if (strcmp(line, "help") == 0) {
     help();
   } else if (strcmp(line, "status") == 0) {
     status();
+  } else if (strcmp(line, "sweep") == 0) {
+    sweep();
   } else if (strcmp(line, "test") == 0) {
     runTest(5);
   } else if (strncmp(line, "test ", 5) == 0) {
